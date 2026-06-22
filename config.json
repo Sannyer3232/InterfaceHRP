@@ -1,0 +1,7 @@
+{
+    "theme": "claro",
+    "permissions": {
+        "arquivos": true,
+        "camera": false
+    }
+}

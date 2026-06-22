@@ -1,0 +1,9 @@
+# Core Dependencies for Posture Evaluation App
+PyQt6
+torch
+torchvision
+mediapipe
+opencv-python
+numpy
+joblib
+matplotlib
