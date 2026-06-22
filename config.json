@@ -3,5 +3,8 @@
     "permissions": {
         "arquivos": true,
         "camera": false
-    }
+    },
+    "model_path": "/home/sannyer-carvalho/Documentos/Projects/teste_interface/model/modelo_cnn_lstm_esqueletos.pth",
+    "scaler_path": "/home/sannyer-carvalho/Documentos/Projects/teste_interface/model/scaler_cnn_lstm.pkl",
+    "encoder_path": "/home/sannyer-carvalho/Documentos/Projects/teste_interface/model/encoder_cnn_lstm.pkl"
 }

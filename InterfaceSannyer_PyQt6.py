@@ -19,7 +19,8 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QFileDialog, 
                              QMessageBox, QStackedWidget, QRadioButton, 
-                             QGroupBox, QCheckBox, QFrame, QScrollArea, QDialog)
+                             QGroupBox, QCheckBox, QFrame, QScrollArea, QDialog,
+                             QComboBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QImage, QPixmap, QFont, QColor, QPalette
 
@@ -84,6 +85,46 @@ class SkeletonNet(nn.Module):
         x = self.saida(x)
         return x
 
+class CNNLSTMNet(nn.Module):
+    def __init__(self, num_features=99, num_classes=9):
+        super(CNNLSTMNet, self).__init__()
+        
+        self.conv1d = nn.Conv1d(in_channels=num_features, out_channels=256, kernel_size=1)
+        self.bn_conv = nn.BatchNorm1d(256)
+        
+        self.bilstm1 = nn.LSTM(input_size=256, hidden_size=128, bidirectional=True, batch_first=True)
+        self.bilstm2 = nn.LSTM(input_size=256, hidden_size=64, bidirectional=True, batch_first=True)
+        
+        self.attention_dense = nn.Linear(128, 128)
+        self.attention_out = nn.Linear(128, 1, bias=False)
+        
+        self.dense_final = nn.Sequential(
+            nn.Linear(128, 128),
+            nn.ReLU()
+        )
+        self.classificador = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        if x.dim() == 2:
+            x = x.unsqueeze(2)
+        elif x.dim() == 3:
+            x = x.transpose(1, 2)
+            
+        x = torch.relu(self.bn_conv(self.conv1d(x)))
+        x = x.transpose(1, 2)
+        
+        x, _ = self.bilstm1(x)
+        x, _ = self.bilstm2(x)
+        
+        u = torch.tanh(self.attention_dense(x))
+        att_scores = self.attention_out(u)
+        att_weights = torch.softmax(att_scores, dim=1)
+        
+        context = torch.sum(att_weights * x, dim=1)
+        x = self.dense_final(context)
+        x = self.classificador(x)
+        return x
+
 # ============================================
 # THREAD DA CÂMERA
 # ============================================
@@ -124,9 +165,9 @@ class PostureEvaluationApp(QMainWindow):
         # Configurações de Path
         self.base_path = ROOT
         self.config_file = os.path.join(self.base_path, 'config.json')
-        self.model_filename = ROOT / 'model' / 'modelo_dl_esqueletos.pth'
-        self.scaler_filename = ROOT / 'model' / 'scaler_dl.pkl'
-        self.encoder_filename = ROOT / 'model' / 'encoder_dl.pkl'
+        self.model_filename = ROOT / 'model' / 'modelo_cnn_lstm_esqueletos.pth'
+        self.scaler_filename = ROOT / 'model' / 'scaler_cnn_lstm.pkl'
+        self.encoder_filename = ROOT / 'model' / 'encoder_cnn_lstm.pkl'
         self.mp_task_filename = 'pose_landmarker.task'
         self.NUM_FEATURES = 99
         
@@ -151,12 +192,19 @@ class PostureEvaluationApp(QMainWindow):
     def load_config(self):
         default_config = {
             'theme': 'claro',
-            'permissions': {'arquivos': False, 'camera': False}
+            'permissions': {'arquivos': False, 'camera': False},
+            'model_path': str(ROOT / 'model' / 'modelo_dl_esqueletos.pth'),
+            'scaler_path': str(ROOT / 'model' / 'scaler_dl.pkl'),
+            'encoder_path': str(ROOT / 'model' / 'encoder_dl.pkl')
         }
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
+                    # Merge keys if missing
+                    for key, val in default_config.items():
+                        if key not in self.config:
+                            self.config[key] = val
             except:
                 self.config = default_config
         else:
@@ -164,10 +212,16 @@ class PostureEvaluationApp(QMainWindow):
         
         self.theme = self.config.get('theme', 'claro')
         self.permissions = self.config.get('permissions', {'arquivos': False, 'camera': False})
+        self.model_filename = self.config.get('model_path')
+        self.scaler_filename = self.config.get('scaler_path')
+        self.encoder_filename = self.config.get('encoder_path')
 
     def save_config(self):
         self.config['theme'] = self.theme
         self.config['permissions'] = self.permissions
+        self.config['model_path'] = str(self.model_filename)
+        self.config['scaler_path'] = str(self.scaler_filename)
+        self.config['encoder_path'] = str(self.encoder_filename)
         with open(self.config_file, 'w', encoding='utf-8') as f:
             json.dump(self.config, f, indent=4)
 
@@ -246,6 +300,28 @@ class PostureEvaluationApp(QMainWindow):
         perms_layout.addWidget(self.chk_cam)
         group_perms.setLayout(perms_layout)
         layout.addWidget(group_perms)
+        
+        group_model = QGroupBox("🧠 Modelo e Pesos")
+        model_layout = QVBoxLayout()
+        
+        dropdown_label = QLabel("Selecionar Modelo Disponível:")
+        self.combo_models = QComboBox()
+        self.populate_model_combo()
+        self.combo_models.currentIndexChanged.connect(self.on_model_combo_changed)
+        
+        self.lbl_model_path = QLabel(f"Caminho do Modelo: {os.path.basename(self.model_filename)}")
+        self.lbl_model_path.setWordWrap(True)
+        self.lbl_model_path.setStyleSheet("font-size: 11px; color: #888;")
+        
+        btn_change_model = QPushButton("🔍 Procurar outro arquivo .pth...")
+        btn_change_model.clicked.connect(self.change_model_file)
+        
+        model_layout.addWidget(dropdown_label)
+        model_layout.addWidget(self.combo_models)
+        model_layout.addWidget(self.lbl_model_path)
+        model_layout.addWidget(btn_change_model)
+        group_model.setLayout(model_layout)
+        layout.addWidget(group_model)
         
         layout.addStretch()
         self.central_widget.addWidget(page)
@@ -326,19 +402,26 @@ class PostureEvaluationApp(QMainWindow):
             print(f"Erro MediaPipe: {e}")
             
         # PyTorch
+        self.mlp_loaded = False
         try:
             if os.path.exists(self.model_filename) and os.path.exists(self.scaler_filename) and os.path.exists(self.encoder_filename):
                 self.scaler = joblib.load(self.scaler_filename)
                 self.label_encoder = joblib.load(self.encoder_filename)
                 self.CLASSES = self.label_encoder.classes_
                 
-                self.model = SkeletonNet(self.NUM_FEATURES, len(self.CLASSES))
-                self.model.load_state_dict(torch.load(self.model_filename, map_location=self.device))
+                # Check model architecture dynamically
+                state_dict = torch.load(self.model_filename, map_location=self.device)
+                if "conv1d.weight" in state_dict:
+                    self.model = CNNLSTMNet(self.NUM_FEATURES, len(self.CLASSES))
+                else:
+                    self.model = SkeletonNet(self.NUM_FEATURES, len(self.CLASSES))
+                
+                self.model.load_state_dict(state_dict)
                 self.model.to(self.device)
                 self.model.eval()
                 self.mlp_loaded = True
         except Exception as e:
-            print(f"Erro PyTorch: {e}")
+            print(f"Erro PyTorch ao carregar modelo ({self.model_filename}): {e}")
             
         self.update_status_text()
 
@@ -376,6 +459,157 @@ class PostureEvaluationApp(QMainWindow):
         self.permissions['camera'] = self.chk_cam.isChecked()
         self.save_config()
 
+    def get_available_models(self):
+        model_dir = ROOT / 'model'
+        models = []
+        if os.path.exists(model_dir):
+            for f in os.listdir(model_dir):
+                if f.endswith('.pth'):
+                    models.append(os.path.join(model_dir, f))
+        return sorted(models)
+
+    def populate_model_combo(self):
+        self.combo_models.clear()
+        available_models = self.get_available_models()
+        
+        for path in available_models:
+            name = os.path.basename(path)
+            if name == "modelo_dl_esqueletos.pth":
+                display_name = "Rede Neural MLP (Padrão)"
+            elif name == "modelo_cnn_lstm_esqueletos.pth":
+                display_name = "Rede Neural CNN-LSTM"
+            else:
+                display_name = name
+            
+            self.combo_models.addItem(display_name, path)
+            
+        self.update_model_dropdown_selection()
+
+    def update_model_dropdown_selection(self):
+        self.combo_models.blockSignals(True)
+        
+        current_path = str(self.model_filename)
+        found = False
+        for i in range(self.combo_models.count()):
+            path_in_combo = self.combo_models.itemData(i)
+            if (os.path.exists(path_in_combo) and os.path.exists(current_path) and os.path.samefile(path_in_combo, current_path)) or path_in_combo == current_path:
+                self.combo_models.setCurrentIndex(i)
+                found = True
+                break
+                
+        if not found and os.path.exists(current_path):
+            display_name = f"Customizado: {os.path.basename(current_path)}"
+            self.combo_models.addItem(display_name, current_path)
+            self.combo_models.setCurrentIndex(self.combo_models.count() - 1)
+            
+        self.combo_models.blockSignals(False)
+
+    def on_model_combo_changed(self, index):
+        if index < 0:
+            return
+        model_path = self.combo_models.itemData(index)
+        if model_path:
+            scaler_path, encoder_path = self.resolve_model_assets(model_path)
+            
+            self.model_filename = model_path
+            if scaler_path:
+                self.scaler_filename = scaler_path
+            if encoder_path:
+                self.encoder_filename = encoder_path
+                
+            self.save_config()
+            self.load_models()
+            self.lbl_model_path.setText(f"Caminho do Modelo: {os.path.basename(self.model_filename)}")
+
+    def resolve_model_assets(self, model_path):
+        model_name = os.path.basename(model_path)
+        parent_dir = os.path.dirname(model_path)
+        
+        scaler_path = None
+        encoder_path = None
+        
+        # Check standard pattern: modelo_<type>_esqueletos.pth
+        if model_name.startswith("modelo_") and model_name.endswith("_esqueletos.pth"):
+            key = model_name[len("modelo_"):-len("_esqueletos.pth")]
+            s_name = f"scaler_{key}.pkl"
+            e_name = f"encoder_{key}.pkl"
+            candidate_s = os.path.join(parent_dir, s_name)
+            candidate_e = os.path.join(parent_dir, e_name)
+            if os.path.exists(candidate_s):
+                scaler_path = candidate_s
+            if os.path.exists(candidate_e):
+                encoder_path = candidate_e
+                
+        # If not matched, try generic: modelo_<key>.pth -> scaler_<key>.pkl
+        if not scaler_path or not encoder_path:
+            base_key = model_name[:-4]
+            if base_key.startswith("modelo_"):
+                base_key = base_key[len("modelo_"):]
+            
+            s_name = f"scaler_{base_key}.pkl"
+            e_name = f"encoder_{base_key}.pkl"
+            candidate_s = os.path.join(parent_dir, s_name)
+            candidate_e = os.path.join(parent_dir, e_name)
+            if os.path.exists(candidate_s):
+                scaler_path = candidate_s
+            if os.path.exists(candidate_e):
+                encoder_path = candidate_e
+
+        # Generic scanning fallback
+        if not scaler_path or not encoder_path:
+            if os.path.exists(parent_dir):
+                all_files = os.listdir(parent_dir)
+                scalers = [f for f in all_files if "scaler" in f and f.endswith(".pkl")]
+                encoders = [f for f in all_files if "encoder" in f and f.endswith(".pkl")]
+                
+                model_base = model_name.replace(".pth", "")
+                parts = model_base.split("_")
+                
+                for s in scalers:
+                    if any(part in s for part in parts if part not in ["modelo", "esqueletos"]):
+                        scaler_path = os.path.join(parent_dir, s)
+                        break
+                if not scaler_path and scalers:
+                    scaler_path = os.path.join(parent_dir, scalers[0])
+                    
+                for e in encoders:
+                    if any(part in e for part in parts if part not in ["modelo", "esqueletos"]):
+                        encoder_path = os.path.join(parent_dir, e)
+                        break
+                if not encoder_path and encoders:
+                    encoder_path = os.path.join(parent_dir, encoders[0])
+                    
+        return scaler_path, encoder_path
+
+    def change_model_file(self):
+        if not self.permissions['arquivos']:
+            QMessageBox.warning(self, "Aviso", "Ative a permissão de arquivos para selecionar um novo modelo!")
+            return
+            
+        file_path, _ = QFileDialog.getOpenFileName(self, "Selecionar Modelo PyTorch (.pth)", str(ROOT / 'model'), "Modelos PyTorch (*.pth)")
+        if file_path:
+            scaler_path, encoder_path = self.resolve_model_assets(file_path)
+            
+            if not scaler_path or not encoder_path:
+                QMessageBox.warning(self, "Aviso", 
+                                    "Não foram encontrados arquivos de scaler (.pkl) ou encoder (.pkl) correspondentes automaticamente.\n"
+                                    "Por favor, verifique se eles estão na mesma pasta com prefixos correspondentes.")
+            
+            self.model_filename = file_path
+            if scaler_path:
+                self.scaler_filename = scaler_path
+            if encoder_path:
+                self.encoder_filename = encoder_path
+                
+            self.save_config()
+            self.load_models()
+            
+            # Recarregar dropdown para incluir/selecionar este arquivo
+            self.populate_model_combo()
+            self.lbl_model_path.setText(f"Caminho do Modelo: {os.path.basename(self.model_filename)}")
+            
+            QMessageBox.information(self, "Sucesso", f"Modelo alterado com sucesso!\n\nModelo: {os.path.basename(file_path)}")
+
     def apply_theme(self):
         if self.theme == 'escuro':
             qss = """
@@ -384,6 +618,8 @@ class PostureEvaluationApp(QMainWindow):
             QPushButton:hover { background-color: #1565c0; }
             QGroupBox { border: 1px solid #555; margin-top: 10px; padding-top: 10px; font-weight: bold; }
             QLabel { color: #ffffff; }
+            QComboBox { background-color: #333333; color: white; border: 1px solid #555; border-radius: 5px; padding: 8px; font-weight: bold; min-height: 35px; }
+            QComboBox QAbstractItemView { background-color: #333333; color: white; selection-background-color: #0d47a1; }
             """
         else:
             qss = """
@@ -392,6 +628,8 @@ class PostureEvaluationApp(QMainWindow):
             QPushButton:hover { background-color: #45a049; }
             QGroupBox { border: 1px solid #ccc; margin-top: 10px; padding-top: 10px; font-weight: bold; }
             QLabel { color: #000000; }
+            QComboBox { background-color: #ffffff; color: black; border: 1px solid #ccc; border-radius: 5px; padding: 8px; font-weight: bold; min-height: 35px; }
+            QComboBox QAbstractItemView { background-color: #ffffff; color: black; selection-background-color: #4CAF50; selection-color: white; }
             """
         self.setStyleSheet(qss)
 
